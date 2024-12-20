@@ -7,9 +7,9 @@ app.use(cors());
 
 // Configuration
 const CONFIG = {
-    DELAY_BETWEEN_REQUESTS: 2000,    // 2 secondes entre chaque requête
+    DELAY_BETWEEN_REQUESTS: 500,     // 500ms entre chaque requête
     MAX_RETRIES: 3,                  // Nombre maximum de tentatives
-    RETRY_DELAY: 5000,               // 5 secondes entre chaque tentative
+    RETRY_DELAY: 2000,               // 2 secondes entre chaque tentative
     CACHE_DURATION: 24 * 60 * 60 * 1000  // 24 heures
 };
 
@@ -24,16 +24,19 @@ setInterval(() => {
 // Fonction pour vérifier un mot sur Wiktionnaire
 async function checkWiktionaryWord(word) {
     try {
-        console.log(`Vérification du mot "${word}" sur Wiktionnaire...`);
-        
+        console.log(`\nVérification du mot "${word}" sur Wiktionnaire...`);
+
+        // Vérifier si le mot est vide ou invalide
+        if (!word || word.length < 2) {
+            console.log(`Mot "${word}" invalide (trop court)`);
+            return false;
+        }
+
         const params = new URLSearchParams({
-            action: 'parse',
-            page: word,
+            action: 'query',
+            titles: word,
             format: 'json',
-            prop: 'wikitext',
-            formatversion: '2',
-            origin: '*',
-            redirects: '1'
+            formatversion: '2'
         });
 
         const url = `https://fr.wiktionary.org/w/api.php?${params}`;
@@ -47,20 +50,18 @@ async function checkWiktionaryWord(word) {
         }
 
         const data = await response.json();
-        
-        if (!data.parse?.wikitext) {
+        console.log('Réponse reçue:', JSON.stringify(data, null, 2));
+
+        // Vérifier si la page existe
+        if (data.query?.pages?.[0]?.missing) {
             console.log(`Mot "${word}" non trouvé dans Wiktionnaire`);
             return false;
         }
 
-        const content = typeof data.parse.wikitext === 'string'
-            ? data.parse.wikitext
-            : data.parse.wikitext['*'] || data.parse.wikitext.content;
+        // Si on arrive ici, c'est que le mot existe dans Wiktionnaire
+        console.log(`Mot "${word}" trouvé dans Wiktionnaire`);
+        return true;
 
-        const isValid = content.includes('{{langue|fr}}') || content.includes('{{=fr=}}');
-        console.log(`Mot "${word}" ${isValid ? 'trouvé' : 'non trouvé'} dans Wiktionnaire`);
-        
-        return isValid;
     } catch (error) {
         console.error(`Erreur lors de la vérification de "${word}":`, error);
         throw error;
@@ -70,18 +71,17 @@ async function checkWiktionaryWord(word) {
 // Route pour vérifier un mot
 app.get('/check-word/:word', async (req, res) => {
     try {
-        const word = req.params.word.toLowerCase();
+        const word = decodeURIComponent(req.params.word.toLowerCase());
         console.log(`\nNouvelle requête pour le mot "${word}"`);
 
         // Vérifier le cache d'abord
         if (cache.has(word)) {
-            console.log(`Mot "${word}" trouvé dans le cache`);
-            res.json({ isValid: cache.get(word) });
-            return;
+            console.log(`Mot "${word}" trouvé dans le cache: ${cache.get(word)}`);
+            return res.json({ isValid: cache.get(word) });
         }
 
-        // Ajouter un délai pour éviter les rate limits
-        await new Promise(resolve => setTimeout(resolve, Math.random() * 1000 + 500));
+        // Ajouter un petit délai aléatoire
+        await new Promise(resolve => setTimeout(resolve, Math.random() * 200));
 
         const isValid = await checkWiktionaryWord(word);
         
