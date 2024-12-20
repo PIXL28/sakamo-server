@@ -8,10 +8,44 @@ app.use(cors());
 // Cache pour stocker les résultats des requêtes
 const cache = new Map();
 
+// File d'attente pour les requêtes
+let requestQueue = [];
+let isProcessing = false;
+const DELAY_BETWEEN_REQUESTS = 1000; // 1 seconde entre chaque requête
+
 // Fonction pour nettoyer le cache toutes les 24 heures
 setInterval(() => {
     cache.clear();
 }, 24 * 60 * 60 * 1000);
+
+// Fonction pour traiter la file d'attente
+async function processQueue() {
+    if (isProcessing || requestQueue.length === 0) return;
+    
+    isProcessing = true;
+    
+    while (requestQueue.length > 0) {
+        const { word, resolve, reject } = requestQueue.shift();
+        try {
+            const result = await checkWiktionaryWord(word);
+            resolve(result);
+            // Attendre 1 seconde entre chaque requête
+            await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_REQUESTS));
+        } catch (error) {
+            reject(error);
+        }
+    }
+    
+    isProcessing = false;
+}
+
+// Fonction pour ajouter une requête à la file d'attente
+function queueRequest(word) {
+    return new Promise((resolve, reject) => {
+        requestQueue.push({ word, resolve, reject });
+        processQueue();
+    });
+}
 
 // Fonction pour vérifier un mot sur Wiktionnaire
 async function checkWiktionaryWord(word) {
@@ -53,10 +87,8 @@ app.get('/check-word/:word', async (req, res) => {
             return;
         }
 
-        // Ajouter un délai aléatoire pour éviter de surcharger l'API
-        await new Promise(resolve => setTimeout(resolve, Math.random() * 100 + 50));
-
-        const isValid = await checkWiktionaryWord(word);
+        // Ajouter la requête à la file d'attente
+        const isValid = await queueRequest(word);
         
         // Stocker le résultat dans le cache
         cache.set(word, isValid);
@@ -66,7 +98,6 @@ app.get('/check-word/:word', async (req, res) => {
     } catch (error) {
         console.error('Erreur lors de la vérification du mot:', error);
         
-        // Si c'est une erreur de rate limit, on renvoie un code spécial
         if (error.message.includes('429')) {
             res.status(429).json({ 
                 error: 'Too Many Requests',
