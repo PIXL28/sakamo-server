@@ -16,37 +16,31 @@ const CONFIG = {
 // Cache pour stocker les résultats des requêtes
 const cache = new Map();
 
-// File d'attente pour les requêtes
-let requestQueue = [];
-let isProcessing = false;
-
 // Fonction pour nettoyer le cache toutes les 24 heures
 setInterval(() => {
     cache.clear();
 }, CONFIG.CACHE_DURATION);
 
-// Fonction pour attendre
-const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-// Fonction pour vérifier un mot sur Wiktionnaire avec retry
-async function checkWiktionaryWord(word, retryCount = 0) {
+// Fonction pour vérifier un mot sur Wiktionnaire
+async function checkWiktionaryWord(word) {
     try {
+        console.log(`Vérification du mot "${word}" sur Wiktionnaire...`);
+        
         const params = new URLSearchParams({
             action: 'parse',
             page: word,
             format: 'json',
             prop: 'wikitext',
             formatversion: '2',
+            origin: '*',
             redirects: '1'
         });
 
-        const response = await fetch(`https://fr.wiktionary.org/w/api.php?${params}`);
-        
-        if (response.status === 429 && retryCount < CONFIG.MAX_RETRIES) {
-            console.log(`Rate limit pour "${word}", tentative ${retryCount + 1}/${CONFIG.MAX_RETRIES}`);
-            await wait(CONFIG.RETRY_DELAY);
-            return checkWiktionaryWord(word, retryCount + 1);
-        }
+        const url = `https://fr.wiktionary.org/w/api.php?${params}`;
+        console.log(`URL de requête: ${url}`);
+
+        const response = await fetch(url);
+        console.log(`Statut de la réponse: ${response.status}`);
 
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
@@ -54,7 +48,8 @@ async function checkWiktionaryWord(word, retryCount = 0) {
 
         const data = await response.json();
         
-        if (data.error || !data.parse?.wikitext) {
+        if (!data.parse?.wikitext) {
+            console.log(`Mot "${word}" non trouvé dans Wiktionnaire`);
             return false;
         }
 
@@ -62,58 +57,21 @@ async function checkWiktionaryWord(word, retryCount = 0) {
             ? data.parse.wikitext
             : data.parse.wikitext['*'] || data.parse.wikitext.content;
 
-        return content.includes('{{langue|fr}}') || content.includes('{{=fr=}}');
+        const isValid = content.includes('{{langue|fr}}') || content.includes('{{=fr=}}');
+        console.log(`Mot "${word}" ${isValid ? 'trouvé' : 'non trouvé'} dans Wiktionnaire`);
+        
+        return isValid;
     } catch (error) {
-        if (error.message.includes('429') && retryCount < CONFIG.MAX_RETRIES) {
-            console.log(`Rate limit pour "${word}", tentative ${retryCount + 1}/${CONFIG.MAX_RETRIES}`);
-            await wait(CONFIG.RETRY_DELAY);
-            return checkWiktionaryWord(word, retryCount + 1);
-        }
+        console.error(`Erreur lors de la vérification de "${word}":`, error);
         throw error;
     }
-}
-
-// Fonction pour traiter la file d'attente
-async function processQueue() {
-    if (isProcessing || requestQueue.length === 0) return;
-    
-    isProcessing = true;
-    console.log(`Traitement de la file d'attente (${requestQueue.length} mots)`);
-    
-    while (requestQueue.length > 0) {
-        const { word, resolve, reject } = requestQueue.shift();
-        try {
-            console.log(`Vérification du mot "${word}"`);
-            const result = await checkWiktionaryWord(word);
-            cache.set(word, result);
-            resolve(result);
-            if (requestQueue.length > 0) {
-                console.log(`Attente de ${CONFIG.DELAY_BETWEEN_REQUESTS}ms avant le prochain mot`);
-                await wait(CONFIG.DELAY_BETWEEN_REQUESTS);
-            }
-        } catch (error) {
-            console.error(`Erreur pour le mot "${word}":`, error.message);
-            reject(error);
-        }
-    }
-    
-    isProcessing = false;
-    console.log('File d\'attente traitée');
-}
-
-// Fonction pour ajouter une requête à la file d'attente
-function queueRequest(word) {
-    console.log(`Ajout du mot "${word}" à la file d'attente`);
-    return new Promise((resolve, reject) => {
-        requestQueue.push({ word, resolve, reject });
-        processQueue();
-    });
 }
 
 // Route pour vérifier un mot
 app.get('/check-word/:word', async (req, res) => {
     try {
         const word = req.params.word.toLowerCase();
+        console.log(`\nNouvelle requête pour le mot "${word}"`);
 
         // Vérifier le cache d'abord
         if (cache.has(word)) {
@@ -122,14 +80,21 @@ app.get('/check-word/:word', async (req, res) => {
             return;
         }
 
-        console.log(`Vérification du mot "${word}"`);
-        const isValid = await queueRequest(word);
-        console.log(`Résultat pour "${word}": ${isValid ? 'valide' : 'invalide'}`);
+        // Ajouter un délai pour éviter les rate limits
+        await new Promise(resolve => setTimeout(resolve, Math.random() * 1000 + 500));
+
+        const isValid = await checkWiktionaryWord(word);
+        
+        // Stocker le résultat dans le cache
+        cache.set(word, isValid);
+        
+        console.log(`Réponse finale pour "${word}": ${isValid}`);
         res.json({ isValid });
     } catch (error) {
-        console.error('Erreur:', error);
+        console.error('Erreur complète:', error);
         
         if (error.message.includes('429')) {
+            console.log('Rate limit détecté, envoi de 429');
             res.status(429).json({ 
                 error: 'Too Many Requests',
                 message: 'Veuillez réessayer dans quelques secondes'
@@ -139,7 +104,7 @@ app.get('/check-word/:word', async (req, res) => {
         
         res.status(500).json({ 
             error: 'Erreur serveur',
-            message: 'Une erreur est survenue lors de la vérification du mot'
+            message: error.message
         });
     }
 });
@@ -149,7 +114,6 @@ app.get('/ping', (req, res) => {
     res.json({ 
         status: 'ok', 
         message: 'Serveur Sakamo opérationnel',
-        queueLength: requestQueue.length,
         cacheSize: cache.size
     });
 });
